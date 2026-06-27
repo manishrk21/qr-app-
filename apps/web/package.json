@@ -1,0 +1,28 @@
+{
+  "name": "@menuflow/web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@menuflow/shared": "*",
+    "@supabase/ssr": "^0.6.1",
+    "@supabase/supabase-js": "^2.54.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "nanoid": "^5.1.0",
+    "next": "14.2.30",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "qrcode": "^1.5.4",
+    "zustand": "^5.0.3",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5"
+  }
+}

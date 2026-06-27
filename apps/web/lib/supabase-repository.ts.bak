@@ -1,0 +1,744 @@
+import { createSupabaseAdminClient } from "./supabase/admin";
+import { createSupabaseServerClient } from "./supabase/server";
+import type { UUID, Restaurant, MenuItem, MenuCategory, Order, Customer, Table } from "@/types/domain";
+import { nanoid } from "nanoid";
+import crypto from "crypto";
+
+type Database = ReturnType<typeof createSupabaseAdminClient> | ReturnType<typeof createSupabaseServerClient>;
+
+function hashOtp(otp: string): string {
+  return crypto.createHash("sha256").update(otp).digest("hex");
+}
+
+export class SupabaseRepository {
+  private supabase: Database;
+
+  constructor(supabase: Database) {
+    this.supabase = supabase;
+  }
+
+  // ===== Restaurants =====
+  async getRestaurantBySlug(slug: string): Promise<Restaurant | null> {
+    try {
+      const { data, error } = await this.supabase
+        .from("restaurants")
+        .select("*")
+        .eq("slug", slug)
+        .eq("is_active", true)
+        .eq("deleted_at", null)
+        .single();
+
+      if (error) {
+        console.error("Error fetching restaurant:", error);
+        return null;
+      }
+
+      return this.mapRestaurant(data);
+    } catch (error) {
+      console.error("Exception in getRestaurantBySlug:", error);
+      return null;
+    }
+  }
+
+  async getRestaurantById(id: UUID): Promise<Restaurant | null> {
+    try {
+      const { data, error } = await this.supabase
+        .from("restaurants")
+        .select("*")
+        .eq("id", id)
+        .eq("deleted_at", null)
+        .single();
+
+      if (error) {
+        console.error("Error fetching restaurant by id:", error);
+        return null;
+      }
+
+      return this.mapRestaurant(data);
+    } catch (error) {
+      console.error("Exception in getRestaurantById:", error);
+      return null;
+    }
+  }
+
+  // ===== Menu Catalog =====
+  async getMenuCatalogByRestaurantSlug(slug: string) {
+    try {
+      const restaurant = await this.getRestaurantBySlug(slug);
+      if (!restaurant) {
+        return null;
+      }
+
+      const [categories, items] = await Promise.all([
+        this.getCategoriesByRestaurantId(restaurant.id),
+        this.getMenuItemsByRestaurantId(restaurant.id)
+      ]);
+
+      return {
+        restaurant,
+        categories,
+        items
+      };
+    } catch (error) {
+      console.error("Exception in getMenuCatalogByRestaurantSlug:", error);
+      return null;
+    }
+  }
+
+  async getCategoriesByRestaurantId(restaurantId: UUID): Promise<MenuCategory[]> {
+    try {
+      const { data, error } = await this.supabase
+        .from("menu_categories")
+        .select("*")
+        .eq("restaurant_id", restaurantId)
+        .eq("is_active", true)
+        .eq("deleted_at", null)
+        .order("display_order", { ascending: true });
+
+      if (error) {
+        console.error("Error fetching categories:", error);
+        return [];
+      }
+
+      return (data || []).map(this.mapMenuCategory);
+    } catch (error) {
+      console.error("Exception in getCategoriesByRestaurantId:", error);
+      return [];
+    }
+  }
+
+  async getMenuItemsByRestaurantId(restaurantId: UUID): Promise<MenuItem[]> {
+    try {
+      const { data, error } = await this.supabase
+        .from("menu_items")
+        .select("*")
+        .eq("restaurant_id", restaurantId)
+        .eq("is_available", true)
+        .eq("deleted_at", null)
+        .order("display_order", { ascending: true });
+
+      if (error) {
+        console.error("Error fetching menu items:", error);
+        return [];
+      }
+
+      return (data || []).map(this.mapMenuItem);
+    } catch (error) {
+      console.error("Exception in getMenuItemsByRestaurantId:", error);
+      return [];
+    }
+  }
+
+  async getMenuItemById(itemId: UUID): Promise<MenuItem | null> {
+    try {
+      const { data, error } = await this.supabase
+        .from("menu_items")
+        .select("*")
+        .eq("id", itemId)
+        .eq("deleted_at", null)
+        .single();
+
+      if (error) {
+        console.error("Error fetching menu item:", error);
+        return null;
+      }
+
+      return this.mapMenuItem(data);
+    } catch (error) {
+      console.error("Exception in getMenuItemById:", error);
+      return null;
+    }
+  }
+
+  // ===== Tables =====
+  async getTablesByRestaurantId(restaurantId: UUID): Promise<Table[]> {
+    try {
+      const { data, error } = await this.supabase
+        .from("tables")
+        .select("*")
+        .eq("restaurant_id", restaurantId)
+        .eq("is_active", true)
+        .eq("deleted_at", null)
+        .order("label", { ascending: true });
+
+      if (error) {
+        console.error("Error fetching tables:", error);
+        return [];
+      }
+
+      return (data || []).map(this.mapTable);
+    } catch (error) {
+      console.error("Exception in getTablesByRestaurantId:", error);
+      return [];
+    }
+  }
+
+  async getTableById(tableId: UUID): Promise<Table | null> {
+    try {
+      const { data, error } = await this.supabase
+        .from("tables")
+        .select("*")
+        .eq("id", tableId)
+        .eq("deleted_at", null)
+        .single();
+
+      if (error) {
+        console.error("Error fetching table:", error);
+        return null;
+      }
+
+      return this.mapTable(data);
+    } catch (error) {
+      console.error("Exception in getTableById:", error);
+      return null;
+    }
+  }
+
+  // ===== Customers & Sessions =====
+  async getOrCreateCustomer(input: {
+    restaurantId: UUID;
+    mobileNumber: string;
+    isGuest?: boolean;
+  }): Promise<Customer | null> {
+    try {
+      // Try to get existing customer
+      const { data: existing } = await this.supabase
+        .from("customers")
+        .select("*")
+        .eq("restaurant_id", input.restaurantId)
+        .eq("mobile_number", input.mobileNumber)
+        .single();
+
+      if (existing) {
+        await this.supabase
+          .from("customers")
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq("id", existing.id);
+
+        return this.mapCustomer(existing);
+      }
+
+      // Create new customer
+      const { data: newCustomer, error } = await this.supabase
+        .from("customers")
+        .insert({
+          restaurant_id: input.restaurantId,
+          mobile_number: input.mobileNumber,
+          is_guest: input.isGuest ?? true,
+          last_seen_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error creating customer:", error);
+        return null;
+      }
+
+      return this.mapCustomer(newCustomer);
+    } catch (error) {
+      console.error("Exception in getOrCreateCustomer:", error);
+      return null;
+    }
+  }
+
+  async createCustomerSession(input: {
+    customerId: UUID;
+    restaurantId: UUID;
+    tableId?: UUID | null;
+    isGuest?: boolean;
+  }): Promise<{ sessionToken: string; expiresAt: string } | null> {
+    try {
+      const sessionToken = `session_${nanoid(32)}`;
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+
+      const { error } = await this.supabase
+        .from("customer_sessions")
+        .insert({
+          customer_id: input.customerId,
+          restaurant_id: input.restaurantId,
+          session_token: sessionToken,
+          table_id: input.tableId ?? null,
+          is_guest: input.isGuest ?? true,
+          expires_at: expiresAt
+        });
+
+      if (error) {
+        console.error("Error creating session:", error);
+        return null;
+      }
+
+      return { sessionToken, expiresAt };
+    } catch (error) {
+      console.error("Exception in createCustomerSession:", error);
+      return null;
+    }
+  }
+
+  async verifySessionToken(sessionToken: string): Promise<{
+    customerId: UUID;
+    restaurantId: UUID;
+    tableId: UUID | null;
+  } | null> {
+    try {
+      const { data, error } = await this.supabase
+        .from("customer_sessions")
+        .select("customer_id, restaurant_id, table_id, expires_at")
+        .eq("session_token", sessionToken)
+        .single();
+
+      if (error || !data) {
+        console.error("Error verifying session:", error);
+        return null;
+      }
+
+      // Check if session is still valid
+      if (new Date(data.expires_at) < new Date()) {
+        console.warn("Session token has expired");
+        return null;
+      }
+
+      return {
+        customerId: data.customer_id as UUID,
+        restaurantId: data.restaurant_id as UUID,
+        tableId: (data.table_id as UUID | null) ?? null
+      };
+    } catch (error) {
+      console.error("Exception in verifySessionToken:", error);
+      return null;
+    }
+  }
+
+  // ===== OTP =====
+  async createOtpRequest(input: {
+    restaurantId: UUID;
+    mobileNumber: string;
+    tableId?: UUID | null;
+  }): Promise<{ otpRequestId: UUID; otp: string; expiresAt: string } | null> {
+    try {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
+      const otpHash = hashOtp(otp);
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+
+      const { data, error } = await this.supabase
+        .from("otp_requests")
+        .insert({
+          mobile_number: input.mobileNumber,
+          restaurant_id: input.restaurantId,
+          otp_hash: otpHash,
+          attempts: 0,
+          is_used: false,
+          expires_at: expiresAt
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error creating OTP request:", error);
+        return null;
+      }
+
+      // In production, send OTP via SMS. For now, return it for demo purposes.
+      return {
+        otpRequestId: data.id as UUID,
+        otp,
+        expiresAt
+      };
+    } catch (error) {
+      console.error("Exception in createOtpRequest:", error);
+      return null;
+    }
+  }
+
+  async verifyOtpRequest(input: {
+    restaurantId: UUID;
+    mobileNumber: string;
+    otp: string;
+  }): Promise<UUID | null> {
+    try {
+      const otpHash = hashOtp(input.otp);
+
+      // Get the most recent OTP request for this number
+      const { data, error } = await this.supabase
+        .from("otp_requests")
+        .select("*")
+        .eq("restaurant_id", input.restaurantId)
+        .eq("mobile_number", input.mobileNumber)
+        .eq("otp_hash", otpHash)
+        .eq("is_used", false)
+        .gte("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error || !data) {
+        console.error("Error verifying OTP:", error);
+        return null;
+      }
+
+      // Check attempts
+      if (data.attempts >= 3) {
+        console.warn("Too many OTP verification attempts");
+        return null;
+      }
+
+      // Mark as used
+      await this.supabase
+        .from("otp_requests")
+        .update({ is_used: true })
+        .eq("id", data.id);
+
+      return data.id as UUID;
+    } catch (error) {
+      console.error("Exception in verifyOtpRequest:", error);
+      return null;
+    }
+  }
+
+  // ===== Orders =====
+  async createOrder(input: {
+    restaurantId: UUID;
+    customerId: UUID;
+    tableId?: UUID | null;
+    items: Array<{ menuItemId: UUID; quantity: number }>;
+    notes?: string;
+  }): Promise<Order | null> {
+    try {
+      // Calculate totals
+      let subtotal = 0;
+      const menuItems: Array<{ menuItemId: UUID; quantity: number; item: MenuItem }> = [];
+
+      for (const item of input.items) {
+        const menuItem = await this.getMenuItemById(item.menuItemId);
+        if (!menuItem) {
+          console.error(`Menu item not found: ${item.menuItemId}`);
+          return null;
+        }
+        menuItems.push({ ...item, item: menuItem });
+        subtotal += menuItem.price * item.quantity;
+      }
+
+      // Get tax rate from restaurant
+      const restaurant = await this.getRestaurantById(input.restaurantId);
+      if (!restaurant) {
+        console.error("Restaurant not found");
+        return null;
+      }
+
+      const taxAmount = Math.round(subtotal * (restaurant.taxRate / 100) * 100) / 100;
+      const totalAmount = subtotal + taxAmount;
+
+      // Create order
+      const { data: order, error: orderError } = await this.supabase
+        .from("orders")
+        .insert({
+          restaurant_id: input.restaurantId,
+          customer_id: input.customerId,
+          table_id: input.tableId ?? null,
+          status: "pending",
+          subtotal,
+          tax_amount: taxAmount,
+          total_amount: totalAmount,
+          notes: input.notes ?? null
+        })
+        .select()
+        .single();
+
+      if (orderError) {
+        console.error("Error creating order:", orderError);
+        return null;
+      }
+
+      // Create order items
+      const { error: itemsError } = await this.supabase
+        .from("order_items")
+        .insert(
+          menuItems.map((item) => ({
+            order_id: order.id,
+            menu_item_id: item.menuItemId,
+            quantity: item.quantity,
+            unit_price: item.item.price,
+            line_total: item.item.price * item.quantity
+          }))
+        );
+
+      if (itemsError) {
+        console.error("Error creating order items:", itemsError);
+        return null;
+      }
+
+      return this.mapOrder(order);
+    } catch (error) {
+      console.error("Exception in createOrder:", error);
+      return null;
+    }
+  }
+
+  async getOrderById(orderId: UUID): Promise<Order | null> {
+    try {
+      const { data: order, error: orderError } = await this.supabase
+        .from("orders")
+        .select("*")
+        .eq("id", orderId)
+        .single();
+
+      if (orderError || !order) {
+        console.error("Error fetching order:", orderError);
+        return null;
+      }
+
+      return this.mapOrder(order);
+    } catch (error) {
+      console.error("Exception in getOrderById:", error);
+      return null;
+    }
+  }
+
+  async getOrdersByCustomerId(customerId: UUID): Promise<Order[]> {
+    try {
+      const { data: orders, error: ordersError } = await this.supabase
+        .from("orders")
+        .select("*")
+        .eq("customer_id", customerId)
+        .order("created_at", { ascending: false });
+
+      if (ordersError) {
+        console.error("Error fetching orders:", ordersError);
+        return [];
+      }
+
+      return (orders || []).map(this.mapOrder);
+    } catch (error) {
+      console.error("Exception in getOrdersByCustomerId:", error);
+      return [];
+    }
+  }
+
+  async getOrdersByRestaurantId(restaurantId: UUID): Promise<Order[]> {
+    try {
+      const { data: orders, error: ordersError } = await this.supabase
+        .from("orders")
+        .select("*")
+        .eq("restaurant_id", restaurantId)
+        .order("created_at", { ascending: false });
+
+      if (ordersError) {
+        console.error("Error fetching orders:", ordersError);
+        return [];
+      }
+
+      return (orders || []).map(this.mapOrder);
+    } catch (error) {
+      console.error("Exception in getOrdersByRestaurantId:", error);
+      return [];
+    }
+  }
+
+  async updateOrderStatus(
+    orderId: UUID,
+    status: Order["status"]
+  ): Promise<Order | null> {
+    try {
+      const { error } = await this.supabase
+        .from("orders")
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq("id", orderId);
+
+      if (error) {
+        console.error("Error updating order status:", error);
+        return null;
+      }
+
+      return this.getOrderById(orderId);
+    } catch (error) {
+      console.error("Exception in updateOrderStatus:", error);
+      return null;
+    }
+  }
+
+  // ===== Analytics & Loyalty =====
+  async getAnalyticsSummary(restaurantId: UUID) {
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const [totalOrders, totalRevenue, totalCustomers, ordersToday] = await Promise.all([
+        this.supabase
+          .from("orders")
+          .select("*", { count: "exact" })
+          .eq("restaurant_id", restaurantId)
+          .neq("status", "cancelled"),
+
+        this.supabase
+          .from("orders")
+          .select("total_amount")
+          .eq("restaurant_id", restaurantId)
+          .neq("status", "cancelled"),
+
+        this.supabase
+          .from("customers")
+          .select("*", { count: "exact" })
+          .eq("restaurant_id", restaurantId),
+
+        this.supabase
+          .from("orders")
+          .select("*", { count: "exact" })
+          .eq("restaurant_id", restaurantId)
+          .gte("created_at", today.toISOString())
+          .neq("status", "cancelled")
+      ]);
+
+      const revenue = (totalRevenue.data || []).reduce(
+        (sum, order) => sum + (order.total_amount || 0),
+        0
+      );
+
+      return {
+        totalOrders: totalOrders.count || 0,
+        totalRevenue: revenue,
+        totalCustomers: totalCustomers.count || 0,
+        ordersToday: ordersToday.count || 0
+      };
+    } catch (error) {
+      console.error("Exception in getAnalyticsSummary:", error);
+      return null;
+    }
+  }
+
+  async getLoyaltyStats(restaurantId: UUID) {
+    try {
+      const { data: visits, error: visitsError } = await this.supabase
+        .from("loyalty_visits")
+        .select("customer_id")
+        .eq("restaurant_id", restaurantId);
+
+      if (visitsError) {
+        console.error("Error fetching loyalty visits:", visitsError);
+        return null;
+      }
+
+      const { data: rewards, error: rewardsError } = await this.supabase
+        .from("loyalty_rewards")
+        .select("*")
+        .eq("restaurant_id", restaurantId)
+        .eq("status", "issued");
+
+      if (rewardsError) {
+        console.error("Error fetching loyalty rewards:", rewardsError);
+        return null;
+      }
+
+      const uniqueCustomers = new Set((visits || []).map((v) => v.customer_id)).size;
+
+      return {
+        uniqueCustomers,
+        totalRewardsIssued: (rewards || []).length,
+        totalRewardsRedeemed:
+          (rewards || []).filter((r) => r.status === "redeemed").length ?? 0
+      };
+    } catch (error) {
+      console.error("Exception in getLoyaltyStats:", error);
+      return null;
+    }
+  }
+
+  // ===== Mapping Functions =====
+  private mapRestaurant(data: any): Restaurant {
+    return {
+      id: data.id as UUID,
+      slug: data.slug,
+      name: data.name,
+      description: data.description || null,
+      phone: data.phone || null,
+      email: data.email || null,
+      address: data.address || null,
+      city: data.city || null,
+      state: data.state || null,
+      pincode: data.pincode || null,
+      currencyCode: data.currency_code || "INR",
+      taxRate: parseFloat(data.tax_rate || "0"),
+      logoUrl: data.logo_url || null,
+      isActive: data.is_active ?? true,
+      isAcceptingOrders: data.is_accepting_orders ?? true,
+      loyaltyStreakTarget: data.loyalty_streak_target || 5,
+      loyaltyRewardDescription: data.loyalty_reward_description || null
+    };
+  }
+
+  private mapMenuCategory(data: any): MenuCategory {
+    return {
+      id: data.id as UUID,
+      restaurantId: data.restaurant_id as UUID,
+      name: data.name,
+      description: data.description || null,
+      displayOrder: data.display_order || 0,
+      isActive: data.is_active ?? true
+    };
+  }
+
+  private mapMenuItem(data: any): MenuItem {
+    return {
+      id: data.id as UUID,
+      restaurantId: data.restaurant_id as UUID,
+      categoryId: data.category_id as UUID,
+      name: data.name,
+      description: data.description || null,
+      price: parseFloat(data.price),
+      imageUrl: data.image_url || null,
+      foodType: data.food_type as "veg" | "non_veg" | "egg",
+      isAvailable: data.is_available ?? true,
+      isFeatured: data.is_featured ?? false,
+      displayOrder: data.display_order || 0,
+      allergens: data.allergens || [],
+      preparationTimeMinutes: data.preparation_time_minutes || null
+    };
+  }
+
+  private mapTable(data: any): Table {
+    return {
+      id: data.id as UUID,
+      restaurantId: data.restaurant_id as UUID,
+      label: data.label,
+      capacity: data.capacity || null,
+      isActive: data.is_active ?? true,
+      qrCodeUrl: data.qr_code_url || null
+    };
+  }
+
+  private mapCustomer(data: any): Customer {
+    return {
+      id: data.id as UUID,
+      restaurantId: data.restaurant_id as UUID,
+      mobileNumber: data.mobile_number,
+      name: data.name || null,
+      isGuest: data.is_guest ?? true,
+      lastSeenAt: data.last_seen_at || new Date().toISOString()
+    };
+  }
+
+  private mapOrder(data: any): Order {
+    return {
+      id: data.id as UUID,
+      restaurantId: data.restaurant_id as UUID,
+      customerId: data.customer_id as UUID,
+      tableId: data.table_id ?? null,
+      status: data.status as Order["status"],
+      subtotal: parseFloat(data.subtotal),
+      taxAmount: parseFloat(data.tax_amount),
+      totalAmount: parseFloat(data.total_amount),
+      notes: data.notes || null,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at || data.created_at
+    };
+  }
+}
+
+export function createRepositoryFromAdmin() {
+  const client = createSupabaseAdminClient();
+  return new SupabaseRepository(client);
+}
+
+export function createRepositoryFromServer() {
+  const client = createSupabaseServerClient();
+  return new SupabaseRepository(client);
+}
